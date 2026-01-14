@@ -22,7 +22,7 @@ def get_db_connection():
         user=os.getenv('root'),
         password=os.getenv('iSEQEeYOZUjEzUkBiShOSKACGOqguOuK'),
         database=os.getenv('railway'),
-        port=int(os.getenv('3306'),
+        port=int(os.getenv('3306', 3306)),
         autocommit=True
     )
 
@@ -105,4 +105,5 @@ async def save_sensor_data(moisture: int = Form(...), water: int = Form(...)):
         return {"status": "success", "command": target_status}
     finally:
         db.close()
+
 

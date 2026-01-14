@@ -1,6 +1,4 @@
 fastapi
 uvicorn[standard]
-paho-mqtt
-pydantic
 mysql-connector-python
-python-dotenv
+python-multipart

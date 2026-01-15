@@ -39,11 +39,11 @@ def get_db_connection():
     """Connect to Railway MySQL"""
     try:
         conn = mysql.connector.connect(
-            host=os.getenv('MYSQL_HOST', 'localhost'),
-            user=os.getenv('MYSQL_USER', 'root'),
-            password=os.getenv('MYSQL_PASSWORD', ''),
-            database=os.getenv('MYSQL_DATABASE', 'railway'),
-            port=int(os.getenv('MYSQL_PORT', 3306)),
+            host=os.getenv('mysql.railway.internal', 'localhost'),
+            user=os.getenv('root', 'root'),
+            password=os.getenv('iSEQEeYOZUjEzUkBiShOSKACGOqguOuK', ''),
+            database=os.getenv('railway', 'railway'),
+            port=int(os.getenv('3306', 3306)),
             autocommit=True,
             connect_timeout=10
         )

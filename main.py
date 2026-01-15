@@ -16,10 +16,10 @@ db_url = os.getenv("DATABASE_URL") or os.getenv("MYSQL_URL")
 if not db_url:
     # Build from components if separate env vars exist
     mysql_user = os.getenv("MYSQL_USER", os.getenv("DB_USER", "root"))
-    mysql_password = os.getenv("MYSQL_PASSWORD", os.getenv("DB_PASSWORD", ""))
-    mysql_host = os.getenv("MYSQL_HOST", os.getenv("DB_HOST", "localhost"))
-    mysql_port = os.getenv("MYSQL_PORT", os.getenv("DB_PORT", "3306"))
-    mysql_db = os.getenv("MYSQL_DB", os.getenv("DB_NAME", "railway"))
+    mysql_password = os.getenv("iSEQEeYOZUjEzUkBiShOSKACGOqguOuK", os.getenv("DB_PASSWORD", ""))
+    mysql_host = os.getenv("mysql.railway.internal", os.getenv("DB_HOST", "localhost"))
+    mysql_port = os.getenv("3306", os.getenv("DB_PORT", "3306"))
+    mysql_db = os.getenv("railway", os.getenv("DB_NAME", "railway"))
     db_url = f"mysql+pymysql://{mysql_user}:{mysql_password}@{mysql_host}:{mysql_port}/{mysql_db}"
 
 # If someone provided a mysql:// URL, SQLAlchemy expects mysql+pymysql:// for PyMySQL driver

@@ -1,70 +1,60 @@
-# GitHub Copilot Chat Assistant
 import os
 from datetime import datetime, time, timedelta
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import List, Optional
+import mysql.connector
+from dotenv import load_dotenv
 
-from flask import Flask, jsonify, request
-from flask_sqlalchemy import SQLAlchemy
-from flask_cors import CORS
+load_dotenv()
 
-# App & CORS
-app = Flask(__name__)
-CORS(app)
+app = FastAPI(title="Smart Irrigation API")
 
-# Database configuration
-# Prefer an existing DATABASE_URL (Railway/Heroku style), otherwise build from components.
-db_url = os.getenv("DATABASE_URL") or os.getenv("MYSQL_URL")
-if not db_url:
-    # Build from components if separate env vars exist
-    mysql_user = os.getenv("MYSQL_USER", os.getenv("DB_USER", "root"))
-    mysql_password = os.getenv("iSEQEeYOZUjEzUkBiShOSKACGOqguOuK", os.getenv("DB_PASSWORD", ""))
-    mysql_host = os.getenv("mysql.railway.internal", os.getenv("DB_HOST", "localhost"))
-    mysql_port = os.getenv("3306", os.getenv("DB_PORT", "3306"))
-    mysql_db = os.getenv("railway", os.getenv("DB_NAME", "railway"))
-    db_url = f"mysql+pymysql://{mysql_user}:{mysql_password}@{mysql_host}:{mysql_port}/{mysql_db}"
+# --- CORS MIDDLEWARE ---
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# If someone provided a mysql:// URL, SQLAlchemy expects mysql+pymysql:// for PyMySQL driver
-if db_url.startswith("mysql://"):
-    db_url = db_url.replace("mysql://", "mysql+pymysql://", 1)
+# --- PYDANTIC MODELS ---
+class SensorData(BaseModel):
+    moisture_level: float
+    water_level: float
+    pump_status: str = "OFF"
 
-app.config["SQLALCHEMY_DATABASE_URI"] = db_url
-app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+class ScheduleData(BaseModel):
+    on_time: str
+    off_time: str
 
-db = SQLAlchemy(app)
+class ControlUpdate(BaseModel):
+    type: str
+    target: Optional[str] = None
+    minutes: Optional[int] = None
 
+# --- DATABASE CONNECTION ---
+def get_db_connection():
+    """Connect to Railway MySQL"""
+    try:
+        conn = mysql.connector.connect(
+            host=os.getenv('MYSQL_HOST', 'localhost'),
+            user=os.getenv('MYSQL_USER', 'root'),
+            password=os.getenv('MYSQL_PASSWORD', ''),
+            database=os.getenv('MYSQL_DATABASE', 'railway'),
+            port=int(os.getenv('MYSQL_PORT', 3306)),
+            autocommit=True,
+            connect_timeout=10
+        )
+        return conn
+    except mysql.connector.Error as err:
+        print(f"❌ Database Error: {err}")
+        return None
 
-# --- DATABASE MODELS ---
-class SensorData(db.Model):
-    __tablename__ = "sensor_data"
-    id = db.Column(db.Integer, primary_key=True)
-    moisture_level = db.Column(db.Float, nullable=False)
-    water_level = db.Column(db.Float, nullable=False)
-    pump_status = db.Column(db.String(10), nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
-
-
-class PumpSchedule(db.Model):
-    __tablename__ = "pump_schedules"
-    id = db.Column(db.Integer, primary_key=True)
-    on_time = db.Column(db.String(8))   # expected "HH:MM" or "HH:MM:SS"
-    off_time = db.Column(db.String(8))
-    is_active = db.Column(db.Boolean, default=True)
-
-
-class PumpControl(db.Model):
-    __tablename__ = "pump_control"
-    id = db.Column(db.Integer, primary_key=True)
-    manual_target = db.Column(db.String(10), default="OFF")  # "ON" or "OFF" or other
-    pause_until = db.Column(db.DateTime, nullable=True)
-
-
-# Create tables if not exist
-with app.app_context():
-    db.create_all()
-
-
-# --- Helpers ---
+# --- HELPERS ---
 def parse_time_str(t: str) -> time:
-    """Parse "HH:MM" or "HH:MM:SS" into datetime.time; raises ValueError if invalid."""
+    """Parse HH:MM or HH:MM:SS"""
     if not t:
         raise ValueError("empty time")
     parts = t.split(":")
@@ -78,174 +68,283 @@ def parse_time_str(t: str) -> time:
         raise ValueError("invalid time format")
     return time(h, m, s)
 
-
 def is_now_between(on_str: str, off_str: str, now_dt: datetime) -> bool:
-    """Check if now (datetime) is between on_time and off_time (strings). Handles overnight ranges."""
+    """Check if now is between on_time and off_time (handles overnight)"""
     try:
         on_t = parse_time_str(on_str)
         off_t = parse_time_str(off_str)
     except Exception:
         return False
-
+    
     now_t = now_dt.time()
-
+    
     if on_t <= off_t:
         return on_t <= now_t <= off_t
     else:
-        # overnight: e.g., on=22:00 off=06:00
+        # overnight range (e.g., 22:00 to 06:00)
         return now_t >= on_t or now_t <= off_t
 
+# --- ENDPOINTS ---
 
-# --- API ENDPOINTS ---
+@app.get("/")
+async def root():
+    return {"status": "online", "message": "Smart Irrigation API - FastAPI"}
 
+@app.get("/health")
+async def health():
+    """Health check"""
+    db = get_db_connection()
+    if db:
+        db.close()
+        return {"status": "healthy", "database": "connected"}
+    return {"status": "unhealthy", "database": "disconnected"}
 
-@app.route("/api/sensor/latest", methods=["GET"])
-def get_latest():
-    data = SensorData.query.order_by(SensorData.created_at.desc()).first()
-    if data:
-        return jsonify({
-            "moisture_level": data.moisture_level,
-            "water_level": data.water_level,
-            "pump_status": data.pump_status,
-            "created_at": data.created_at.isoformat()
-        }), 200
-    return jsonify({"moisture_level": 0, "water_level": 0, "pump_status": "OFF"}), 200
-
-
-@app.route("/api/sensor/history", methods=["GET"])
-def get_history():
-    limit = int(request.args.get("limit", 7))
-    history = SensorData.query.order_by(SensorData.created_at.desc()).limit(limit).all()
-    if not history:
-        return jsonify([]), 200
-
-    # Return oldest -> newest
-    return jsonify([{
-        "moisture": h.moisture_level,
-        "water": h.water_level,
-        "pump_status": h.pump_status,
-        "time": h.created_at.strftime("%H:%M")
-    } for h in reversed(history)]), 200
-
-
-@app.route("/api/control/update", methods=["POST"])
-def update_control():
-    data = request.form.to_dict() or request.get_json(silent=True) or {}
-    ctype = data.get("type")
-    target = data.get("target")
-    minutes = data.get("minutes")
-
-    ctrl = PumpControl.query.first()
-    if not ctrl:
-        ctrl = PumpControl(manual_target="OFF")
-        db.session.add(ctrl)
-
-    if ctype == "manual":
-        # set manual target and clear pause
-        if target:
-            ctrl.manual_target = str(target).upper()
-        ctrl.pause_until = None
-
-    elif ctype == "pause":
-        try:
-            mins = int(minutes or 0)
-            ctrl.pause_until = datetime.utcnow() + timedelta(minutes=mins)
-        except Exception:
-            return jsonify({"error": "invalid minutes"}), 400
-
-    db.session.commit()
-    return jsonify({"status": "success"}), 200
-
-
-@app.route("/api/schedule/add", methods=["POST"])
-def add_schedule():
-    data = request.form.to_dict() or request.get_json(silent=True) or {}
-    on_t = data.get("on_time")
-    off_t = data.get("off_time")
-
-    if not on_t or not off_t:
-        return jsonify({"error": "on_time and off_time are required"}), 400
-
-    # Deactivate all existing schedules and add a new one (same logic as original)
-    PumpSchedule.query.update({"is_active": False})
-    new_sched = PumpSchedule(on_time=on_t, off_time=off_t, is_active=True)
-    db.session.add(new_sched)
-    db.session.commit()
-    return jsonify({"status": "schedule added"}), 201
-
-
-@app.route("/api/sensor/add", methods=["POST"])
-def add_sensor_data():
-    # Simple endpoint for manual data insertion (Postman)
-    data = request.form.to_dict() or request.get_json(silent=True) or {}
+@app.get("/api/sensor/latest")
+async def get_latest():
+    """Get latest sensor data"""
+    db = get_db_connection()
+    if not db:
+        raise HTTPException(status_code=500, detail="Database offline")
+    
     try:
-        moisture = float(data.get("moisture", 0))
-        water = float(data.get("water", 0))
-        pump = data.get("pump", "OFF")
-    except Exception:
-        return jsonify({"error": "invalid numeric values"}), 400
+        cursor = db.cursor(dictionary=True)
+        cursor.execute("""
+            SELECT moisture_level, water_level, pump_status, created_at 
+            FROM sensor_data 
+            ORDER BY created_at DESC LIMIT 1
+        """)
+        row = cursor.fetchone()
+        cursor.close()
+        
+        if row:
+            return {
+                "moisture_level": float(row['moisture_level']),
+                "water_level": float(row['water_level']),
+                "pump_status": row['pump_status'],
+                "created_at": row['created_at'].isoformat() if row['created_at'] else None
+            }
+        return {
+            "moisture_level": 0,
+            "water_level": 0,
+            "pump_status": "OFF",
+            "created_at": None
+        }
+    except Exception as e:
+        print(f"Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
 
-    new_data = SensorData(
-        moisture_level=moisture,
-        water_level=water,
-        pump_status=str(pump).upper()
-    )
-    db.session.add(new_data)
-    db.session.commit()
-    return jsonify({"status": "data added"}), 201
-
-
-@app.route("/api/sensor/save", methods=["POST"])
-def save_sensor_data():
-    # Endpoint intended for hardware (ESP32)
-    data = request.form.to_dict() or request.get_json(silent=True) or {}
+@app.get("/api/sensor/history")
+async def get_history(limit: int = 7):
+    """Get sensor history for charts"""
+    db = get_db_connection()
+    if not db:
+        raise HTTPException(status_code=500, detail="Database offline")
+    
     try:
-        moisture = float(data.get("moisture", data.get("moisture_level", 0)))
-        water = float(data.get("water", data.get("water_level", 0)))
-    except Exception:
-        return jsonify({"error": "invalid numeric values"}), 400
+        cursor = db.cursor(dictionary=True)
+        cursor.execute("""
+            SELECT moisture_level, water_level, pump_status, created_at 
+            FROM sensor_data 
+            ORDER BY created_at DESC LIMIT %s
+        """, (limit,))
+        rows = cursor.fetchall()
+        cursor.close()
+        
+        if not rows:
+            return []
+        
+        # Return oldest to newest
+        rows.reverse()
+        return [{
+            "moisture": h['moisture_level'],
+            "water": h['water_level'],
+            "pump_status": h['pump_status'],
+            "time": h['created_at'].strftime("%H:%M") if h['created_at'] else "N/A"
+        } for h in rows]
+    except Exception as e:
+        print(f"Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
 
-    now = datetime.utcnow()
+@app.post("/api/sensor/add")
+async def add_sensor_data(data: SensorData):
+    """Add sensor data manually"""
+    db = get_db_connection()
+    if not db:
+        raise HTTPException(status_code=500, detail="Database offline")
+    
+    try:
+        cursor = db.cursor()
+        cursor.execute("""
+            INSERT INTO sensor_data (moisture_level, water_level, pump_status)
+            VALUES (%s, %s, %s)
+        """, (data.moisture_level, data.water_level, data.pump_status))
+        cursor.close()
+        
+        return {"status": "data added"}
+    except Exception as e:
+        print(f"Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
 
-    # Load control & schedule
-    ctrl = PumpControl.query.first()
-    target_status = "OFF"
-
-    # 1) manual target takes precedence unless paused
-    if ctrl and ctrl.manual_target:
-        target_status = ctrl.manual_target.upper()
-
-    # 2) if pause_until present and not expired -> force OFF
-    if ctrl and ctrl.pause_until:
-        if now < ctrl.pause_until:
-            target_status = "OFF"
-        else:
-            # pause expired -> clear it
-            ctrl.pause_until = None
-            db.session.add(ctrl)
-            db.session.commit()
-
-    # 3) If no manual ON and not paused, check active schedule(s)
-    if target_status != "ON":
-        active_scheds = PumpSchedule.query.filter_by(is_active=True).all()
-        for s in active_scheds:
-            if s.on_time and s.off_time and is_now_between(s.on_time, s.off_time, now):
+@app.post("/api/sensor/save")
+async def save_sensor_data(data: SensorData):
+    """Save sensor data from ESP32 with smart pump logic"""
+    db = get_db_connection()
+    if not db:
+        raise HTTPException(status_code=500, detail="Database offline")
+    
+    try:
+        now = datetime.utcnow()
+        target_status = "OFF"
+        
+        # Check manual control
+        cursor = db.cursor(dictionary=True)
+        cursor.execute("SELECT manual_target, pause_until FROM pump_control LIMIT 1")
+        ctrl = cursor.fetchone()
+        
+        if ctrl:
+            # Manual ON takes precedence
+            if ctrl['manual_target'] == 'ON':
                 target_status = "ON"
-                break
+            
+            # Pause overrides everything
+            if ctrl['pause_until'] and now < ctrl['pause_until']:
+                target_status = "OFF"
+            else:
+                # Clear expired pause
+                if ctrl['pause_until']:
+                    cursor.execute("UPDATE pump_control SET pause_until = NULL")
+        
+        # Check schedules if no manual ON
+        if target_status != "ON":
+            cursor.execute("""
+                SELECT on_time, off_time FROM pump_schedules 
+                WHERE is_active = TRUE LIMIT 10
+            """)
+            schedules = cursor.fetchall()
+            
+            for sched in schedules:
+                if sched['on_time'] and sched['off_time']:
+                    if is_now_between(sched['on_time'], sched['off_time'], now):
+                        target_status = "ON"
+                        break
+        
+        # Save sensor data
+        cursor.execute("""
+            INSERT INTO sensor_data (moisture_level, water_level, pump_status)
+            VALUES (%s, %s, %s)
+        """, (data.moisture_level, data.water_level, target_status))
+        cursor.close()
+        
+        return {"status": "success", "command": target_status}
+    except Exception as e:
+        print(f"Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
 
-    # Save sensor data with decided pump command/state
-    new_data = SensorData(
-        moisture_level=moisture,
-        water_level=water,
-        pump_status=target_status
-    )
-    db.session.add(new_data)
-    db.session.commit()
+@app.post("/api/control/update")
+async def update_control(control: ControlUpdate):
+    """Update pump control"""
+    db = get_db_connection()
+    if not db:
+        raise HTTPException(status_code=500, detail="Database offline")
+    
+    try:
+        cursor = db.cursor()
+        
+        if control.type == "manual":
+            # Set manual target
+            cursor.execute("""
+                UPDATE pump_control SET manual_target = %s, pause_until = NULL
+                WHERE id = (SELECT MAX(id) FROM pump_control)
+            """, (control.target.upper() if control.target else "OFF",))
+        
+        elif control.type == "pause":
+            # Set pause duration
+            pause_until = datetime.utcnow() + timedelta(minutes=control.minutes or 0)
+            cursor.execute("""
+                UPDATE pump_control SET pause_until = %s
+                WHERE id = (SELECT MAX(id) FROM pump_control)
+            """, (pause_until,))
+        
+        cursor.close()
+        return {"status": "success"}
+    except Exception as e:
+        print(f"Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
 
-    return jsonify({"status": "success", "command": target_status}), 201
+@app.post("/api/schedule/add")
+async def add_schedule(schedule: ScheduleData):
+    """Add pump schedule"""
+    db = get_db_connection()
+    if not db:
+        raise HTTPException(status_code=500, detail="Database offline")
+    
+    try:
+        cursor = db.cursor()
+        
+        # Deactivate all and add new
+        cursor.execute("UPDATE pump_schedules SET is_active = FALSE")
+        cursor.execute("""
+            INSERT INTO pump_schedules (on_time, off_time, is_active)
+            VALUES (%s, %s, TRUE)
+        """, (schedule.on_time, schedule.off_time))
+        
+        cursor.close()
+        return {"status": "schedule added"}
+    except Exception as e:
+        print(f"Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
 
+@app.get("/api/schedule/list")
+async def get_schedules():
+    """Get active schedules"""
+    db = get_db_connection()
+    if not db:
+        raise HTTPException(status_code=500, detail="Database offline")
+    
+    try:
+        cursor = db.cursor(dictionary=True)
+        cursor.execute("""
+            SELECT id, on_time, off_time, is_active 
+            FROM pump_schedules 
+            WHERE is_active = TRUE
+        """)
+        schedules = cursor.fetchall()
+        cursor.close()
+        
+        return schedules if schedules else []
+    except Exception as e:
+        print(f"Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
 
-if __name__ == "__main__":
-    # For local/dev run only. In production (Railway) use the platform's entrypoint.
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+@app.delete("/api/schedule/{schedule_id}")
+async def delete_schedule(schedule_id: int):
+    """Delete schedule"""
+    db = get_db_connection()
+    if not db:
+        raise HTTPException(status_code=500, detail="Database offline")
+    
+    try:
+        cursor = db.cursor()
+        cursor.execute("UPDATE pump_schedules SET is_active = FALSE WHERE id = %s", (schedule_id,))
+        cursor.close()
+        
+        return {"status": "schedule deleted"}
+    except Exception as e:
+        print(f"Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
